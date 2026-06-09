@@ -254,7 +254,7 @@ class _StreamScreenState extends State<StreamScreen> {
                   : ColoredBox(
                       color: const Color(0xFF1A1C1E), // Lighter than black
                       child: Padding(
-                        padding: const EdgeInsets.only(bottom: 200),
+                        padding: const EdgeInsets.only(bottom: 500),
                         child: Center(
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
@@ -411,6 +411,44 @@ class _StreamScreenState extends State<StreamScreen> {
 
                           await streamProvider.startStreamSession();
                         },
+                      ),
+                    if (!streamProvider.isStreaming)
+                      MetaButton.text(
+                        text: 'Capture Picture',
+                        enabled: hasActiveDevice,
+                        onPressed: () async {
+                          unawaited(HapticFeedback.mediumImpact());
+
+                          if (!hasActiveDevice) return;
+
+                          final hasPermission = await deviceProvider
+                              .ensureCameraPermission();
+                          if (!hasPermission || !context.mounted) return;
+
+                          final photo = await streamProvider.capturePhoto();
+                          if (photo == null || !context.mounted) {
+                            return;
+                          }
+                          final box = context.findRenderObject() as RenderBox?;
+                          final shareOrigin = box == null
+                              ? null
+                              : box.localToGlobal(Offset.zero) & box.size;
+                          await SharePlus.instance.share(
+                            ShareParams(
+                              files: [
+                                XFile.fromData(
+                                  photo.bytes,
+                                  mimeType: photo.mimeType,
+                                ),
+                              ],
+                              fileNameOverrides: [
+                                'captured_photo.${photo.fileExtension}',
+                              ],
+                              sharePositionOrigin: shareOrigin,
+                            ),
+                          );
+                        },
+                        color: Colors.blue,
                       ),
                     if (!streamProvider.isStreaming)
                       MetaButton.text(
