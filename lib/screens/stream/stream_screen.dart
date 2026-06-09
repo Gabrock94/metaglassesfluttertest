@@ -2,6 +2,12 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'dart:io';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:record/record.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
+import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_meta_wearables_dat/flutter_meta_wearables_dat.dart';
 import 'package:flutter_meta_wearables_dat_example/providers/device_provider.dart';
 import 'package:flutter_meta_wearables_dat_example/providers/mock_device_provider.dart';
@@ -21,10 +27,28 @@ class StreamScreen extends StatefulWidget {
 class _StreamScreenState extends State<StreamScreen> {
   stream_providers.StreamSessionProvider? _streamProvider;
   StreamSessionError? _shownError;
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  final AudioRecorder _audioRecorder = AudioRecorder();
+  final Stopwatch _recordingStopwatch = Stopwatch();
+  bool _isRecording = false;
+  String? _recordedFilePath;
+  Duration _recordingDuration = Duration.zero;
+  bool _isPlaying = false;
+  bool _isAssetSoundPlaying = false;
+  StreamSubscription? _playerCompleteSubscription;
+  List<InputDevice> _availableMics = [];
+  InputDevice? _selectedMic;
 
   @override
   void initState() {
     super.initState();
+    _playerCompleteSubscription = _audioPlayer.onPlayerComplete.listen((_) {
+      setState(() {
+        _isPlaying = false;
+        _isAssetSoundPlaying = false;
+      });
+    });
+    unawaited(_refreshMics());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _streamProvider = context.read<stream_providers.StreamSessionProvider>();
@@ -36,6 +60,9 @@ class _StreamScreenState extends State<StreamScreen> {
   @override
   void dispose() {
     _streamProvider?.removeListener(_onStreamProviderChanged);
+    _audioPlayer.dispose();
+    _audioRecorder.dispose();
+    _playerCompleteSubscription?.cancel();
     super.dispose();
   }
 
@@ -45,6 +72,25 @@ class _StreamScreenState extends State<StreamScreen> {
     _shownError = error;
     _showErrorSnackBar(error);
     _streamProvider?.clearError();
+  }
+
+  Future<void> _refreshMics() async {
+    if (await Permission.microphone.request().isGranted) {
+      final devices = await _audioRecorder.listInputDevices();
+      setState(() {
+        _availableMics = devices;
+        // Auto-select the glasses if we haven't selected anything yet
+        if (_selectedMic == null) {
+          for (final device in devices) {
+            final label = device.label.toLowerCase();
+            if (label.contains('ray-ban') || label.contains('meta')) {
+              _selectedMic = device;
+              break;
+            }
+          }
+        }
+      });
+    }
   }
 
   void _showErrorSnackBar(StreamSessionError error) {
@@ -93,6 +139,98 @@ class _StreamScreenState extends State<StreamScreen> {
       );
   }
 
+  Future<void> _toggleRecording() async {
+    if (_isRecording) {
+      final path = await _audioRecorder.stop();
+      _recordingStopwatch.stop();
+
+      int fileSize = 0;
+      if (path != null) {
+        final file = File(path);
+        if (await file.exists()) {
+          fileSize = await file.length();
+        }
+      }
+
+      setState(() {
+        _isRecording = false;
+        _recordedFilePath = path;
+        _recordingDuration = _recordingStopwatch.elapsed;
+      });
+      if (mounted) {
+        debugPrint('[Recording] Saved to $path ($fileSize bytes)');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Recording saved (${_recordingDuration.inSeconds}s, ${fileSize ~/ 1024}KB)')),
+        );
+      }
+    } else {
+      if (await Permission.microphone.request().isGranted) {
+        // Ensure mic list is fresh
+        await _refreshMics();
+
+        final directory = await getApplicationDocumentsDirectory();
+        final path = p.join(
+          directory.path,
+          'recording_${DateTime.now().millisecondsSinceEpoch}.m4a',
+        );
+
+        await _audioRecorder.start(
+          RecordConfig(
+            device: _selectedMic,
+            encoder: AudioEncoder.aacLc,
+            sampleRate: 16000,
+            numChannels: 1,
+          ),
+          path: path,
+        );
+        _recordingStopwatch.reset();
+        _recordingStopwatch.start();
+
+        setState(() {
+          _isRecording = true;
+          _recordedFilePath = null;
+          _recordingDuration = Duration.zero;
+        });
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Microphone permission denied')),
+          );
+        }
+      }
+    }
+  }
+
+  Future<void> _playAssetSound() async {
+    if (_isAssetSoundPlaying) {
+      await _audioPlayer.stop();
+      setState(() => _isAssetSoundPlaying = false);
+    } else {
+      unawaited(HapticFeedback.lightImpact());
+      setState(() {
+        _isAssetSoundPlaying = true;
+        _isPlaying = false;
+      });
+      await _audioPlayer.play(AssetSource('sound.mp3'));
+    }
+  }
+
+  Future<void> _playRecording() async {
+    if (_recordedFilePath != null) {
+      if (_isPlaying) {
+        await _audioPlayer.stop();
+        setState(() => _isPlaying = false);
+      } else {
+        unawaited(HapticFeedback.lightImpact());
+        setState(() {
+          _isPlaying = true;
+          _isAssetSoundPlaying = false;
+        });
+        await _audioPlayer.play(DeviceFileSource(_recordedFilePath!));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Consumer3<
@@ -114,41 +252,44 @@ class _StreamScreenState extends State<StreamScreen> {
                       videoStreamSize: streamProvider.videoStreamSize,
                     )
                   : ColoredBox(
-                      color: Colors.black,
-                      child: Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Image.asset(
-                              'assets/images/cameraAccessIcon.png',
-                              width: 120,
-                              color: Colors.white,
-                              colorBlendMode: BlendMode.srcIn,
-                            ),
-                            const SizedBox(height: 12),
-                            const Text(
-                              'Stream Your Glasses Camera',
-                              style: TextStyle(
-                                fontSize: 20,
-                                fontWeight: FontWeight.w600,
+                      color: const Color(0xFF1A1C1E), // Lighter than black
+                      child: Padding(
+                        padding: const EdgeInsets.only(bottom: 200),
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Image.asset(
+                                'assets/images/cameraAccessIcon.png',
+                                width: 120,
                                 color: Colors.white,
+                                colorBlendMode: BlendMode.srcIn,
                               ),
-                            ),
-                            const SizedBox(height: 12),
-                            const Padding(
-                              padding: EdgeInsets.symmetric(
-                                horizontal: 12,
-                              ),
-                              child: Text(
-                                'Tap the Start streaming button to stream video from your glasses or use the camera button to take a photo from your glasses.',
-                                textAlign: TextAlign.center,
+                              const SizedBox(height: 12),
+                              const Text(
+                                'Giulio Meta Glasses Flutter test',
                                 style: TextStyle(
-                                  fontSize: 15,
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w600,
                                   color: Colors.white,
                                 ),
                               ),
-                            ),
-                          ],
+                              const SizedBox(height: 12),
+                              const Padding(
+                                padding: EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                ),
+                                child: Text(
+                                  'Black Magic stuff below.',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -171,7 +312,7 @@ class _StreamScreenState extends State<StreamScreen> {
               ),
             // Controls overlay at the bottom
             Positioned(
-              bottom: 24,
+              bottom: 80,
               left: 0,
               right: 0,
               child: SafeArea(
@@ -218,6 +359,42 @@ class _StreamScreenState extends State<StreamScreen> {
                         ),
                       ),
                     ),
+                    // Mic selection dropdown
+                    if (!streamProvider.isStreaming && _availableMics.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: DropdownButtonHideUnderline(
+                            child: DropdownButton<InputDevice>(
+                              value: _selectedMic,
+                              isExpanded: true,
+                              dropdownColor: Colors.grey.shade900,
+                              icon: const Icon(Icons.mic, color: Colors.white70),
+                              hint: const Text('Select Microphone', style: TextStyle(color: Colors.white70)),
+                              items: _availableMics.map((device) {
+                                return DropdownMenuItem(
+                                  value: device,
+                                  child: Text(
+                                    device.label,
+                                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                );
+                              }).toList(),
+                              onChanged: _isRecording
+                                  ? null
+                                  : (device) {
+                                      setState(() => _selectedMic = device);
+                                    },
+                            ),
+                          ),
+                        ),
+                      ),
                     // Show Start button only when not streaming
                     if (!streamProvider.isStreaming)
                       MetaButton.text(
@@ -234,6 +411,26 @@ class _StreamScreenState extends State<StreamScreen> {
 
                           await streamProvider.startStreamSession();
                         },
+                      ),
+                    if (!streamProvider.isStreaming)
+                      MetaButton.text(
+                        text: _isAssetSoundPlaying ? 'Playing sound...' : 'Play sound',
+                        onPressed: _playAssetSound,
+                        color: _isAssetSoundPlaying ? Colors.red : Colors.deepPurple,
+                      ),
+                    if (!streamProvider.isStreaming)
+                      MetaButton.text(
+                        text: _isRecording ? 'Stop Recording' : 'Record Audio',
+                        onPressed: _toggleRecording,
+                        color: _isRecording ? Colors.red : Colors.teal,
+                      ),
+                    if (!streamProvider.isStreaming && _recordedFilePath != null)
+                      MetaButton.text(
+                        text: _isPlaying
+                            ? 'Stop Playback'
+                            : 'Play Recording (${_recordingDuration.inSeconds}s)',
+                        onPressed: _playRecording,
+                        color: _isPlaying ? Colors.red : Colors.orange,
                       ),
                     // Show Stop button only when streaming
                     if (streamProvider.isStreaming)
