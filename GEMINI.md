@@ -2,6 +2,9 @@
 
 This project is a Flutter implementation utilizing the Meta Wearables DAT SDK.
 
+## Package Information
+- **Package**: [flutter_meta_wearables_dat](https://pub.dev/packages/flutter_meta_wearables_dat)
+
 ## API Reference Summary (v0.17)
 
 The SDK provides a cross-platform framework for Meta AI glasses.
