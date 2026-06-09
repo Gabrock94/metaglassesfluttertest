@@ -295,13 +295,48 @@ class StreamSessionProvider extends ChangeNotifier {
   }
 
   Future<CapturedPhoto?> capturePhoto() async {
+    final wasStreaming = _isStreaming;
     try {
+      if (!wasStreaming) {
+        debugPrint('[MetaWearablesDAT] Starting transient stream for photo capture...');
+        await startStreamSession();
+
+        // Wait for the session to reach the streaming state
+        final completer = Completer<void>();
+        final subscription = MetaWearablesDat.streamSessionStateStream().listen((state) {
+          if (state == StreamSessionState.streaming) {
+            completer.complete();
+          }
+        });
+
+        try {
+          // Timeout after 10 seconds if it fails to start
+          await completer.future.timeout(const Duration(seconds: 10));
+        } catch (e) {
+          debugPrint('[MetaWearablesDAT] Failed to start stream for capture: $e');
+          await subscription.cancel();
+          if (_isStreaming) await stopStreamSession();
+          return null;
+        } finally {
+          await subscription.cancel();
+        }
+      }
+
       final photo = await MetaWearablesDat.capturePhoto(
         mockDeviceProvider.deviceUUID,
       );
+
+      if (!wasStreaming) {
+        debugPrint('[MetaWearablesDAT] Stopping transient stream after photo capture.');
+        await stopStreamSession();
+      }
+
       return photo;
     } catch (e) {
       debugPrint('[MetaWearablesDAT] Error capturing photo: $e');
+      if (!wasStreaming && _isStreaming) {
+        await stopStreamSession();
+      }
       return null;
     }
   }
